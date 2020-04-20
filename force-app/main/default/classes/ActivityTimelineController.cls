@@ -17,19 +17,18 @@ public class ActivityTimelineController {
         }
         
         //Process Accounts
-        if(sobjType == Schema.Account.SObjectType){
+        if(includeChildren){
             //Process Other 'Child' Objects
-            if(includeChildren) {
+            if(sobjType == Schema.Account.SObjectType) {
                 //Contacts
                 Map<Id, Contact> mapDirectContacts = new Map<Id, Contact>([SELECT Id FROM Contact WHERE AccountId =: recordId]);
                 whoIdSet.addAll(mapDirectContacts.keySet());
                 
-                /* Uncomment if multi activity sharing is
-                List<TaskRelation> tr=[SELECT Id, RelationId, TaskId FROM TaskRelation WHERE RelationId IN:mapDirectContacts.keySet()];
+                List<TaskRelation> tr=[SELECT Id, RelationId, TaskId FROM TaskRelation WHERE RelationId IN:mapDirectContacts.keySet()  AND IsDeleted = false  ALL ROWS];
                 for(TaskRelation t:tr) taskIdSet.add(t.TaskId);
-                List<EventRelation> er=[SELECT Id, RelationId, EventId FROM EventRelation WHERE RelationId IN:mapDirectContacts.keySet()];
+                List<EventRelation> er=[SELECT Id, RelationId, EventId FROM EventRelation WHERE RelationId IN:mapDirectContacts.keySet()  AND IsDeleted = false  ALL ROWS];
                 for(EventRelation e:er) eventIdSet.add(e.EventId);
-                */
+                
                 //Opportunities
                 Map<Id, Opportunity> mapDirectOpportunities = new Map<Id, Opportunity>([SELECT Id FROM Opportunity WHERE AccountId =: recordId]);
                 whatIdSet.addAll(mapDirectOpportunities.keySet());
@@ -37,6 +36,18 @@ public class ActivityTimelineController {
                 //Cases
                 Map<Id, Case> mapDirectCases = new Map<Id, Case>([SELECT Id FROM Case WHERE AccountId =: recordId]);
                 whatIdSet.addAll(mapDirectCases.keySet());
+            }
+            if(sobjType == Schema.Contact.SObjectType){
+                //Case
+                Map<Id, Case> mapDirectCases = new Map<Id, Case>([SELECT Id FROM Case WHERE ContactId =: recordId]);
+                whatIdSet.addAll(mapDirectCases.keySet());
+
+                //Contact
+                List<TaskRelation> tr=[SELECT Id, RelationId, TaskId FROM TaskRelation WHERE RelationId=:recordId AND IsDeleted = false  ALL ROWS];
+                for(TaskRelation t:tr) taskIdSet.add(t.TaskId);
+                List<EventRelation> er=[SELECT Id, RelationId, EventId FROM EventRelation WHERE RelationId=:recordId AND IsDeleted = false  ALL ROWS];
+                for(EventRelation e:er) eventIdSet.add(e.EventId);
+            
             }
         }
 
@@ -97,8 +108,8 @@ public class ActivityTimelineController {
         List<Task> taskList = [SELECT Id, ActivityDate, Description, IsRecurrence, OwnerId, Owner.Name, Priority, Status, Subject, 
                                				TaskSubtype, Type, WhatId, What.Name, WhoId, Who.Name
                                	FROM Task
-                               	WHERE WhatId IN: whatIdSet OR WhoId IN: whoIdSet OR Id IN:taskIdSet
-                               		ORDER BY ActivityDate DESC NULLS LAST];
+                               	WHERE (WhatId IN: whatIdSet OR WhoId IN: whoIdSet OR Id IN:taskIdSet) AND IsDeleted = false  
+                               		ORDER BY ActivityDate DESC NULLS LAST ALL ROWS];
 
         //generate a map of Task Status to get Closed Status
         Map<String, TaskStatus> mapTaskStatus = new Map<String, TaskStatus>();
@@ -116,50 +127,15 @@ public class ActivityTimelineController {
         //The Enhanced Emails are stored in the Email Message object but they have a corresponding Task with SubType Email.
         //You need to filter those out in order to prevent duplicate records being displayed
         Map<Id, Task> mapEmailTasks = new Map<Id, Task>();
-        
-        if(taskList.size() > 0) {
-            for(Task taskObj: taskList) {
-                if(taskObj.TaskSubtype == 'Email'){
-                    //Collect tasks for handling email messages separately
-                    mapEmailTasks.put(taskObj.Id, taskObj);
-                } else {
-                    ActivityTimelineModel taskItem = new ActivityTimelineModel();
-                    
-                    taskItem.recordId = taskObj.Id;
-                    taskItem.sobjectName = String.valueOf(Task.SobjectType);
-                    taskItem.activityTimelineType = taskObj.TaskSubtype;
-                    taskItem.activityDate = taskObj.ActivityDate;
-                    taskItem.subject = taskObj.Subject;
-                    taskItem.detail = taskObj.Description;
-
-                    //Assigned To
-                    taskItem.assignedTo = new ActivityTimelineModel.RecordReference(taskObj.OwnerId, taskObj.Owner.Name);
-
-                    //Recipients
-                    if(String.isNotEmpty(taskObj.WhoId)){
-                        //Dont add the current record in Task Contact
-                        if(taskObj.WhoId != recordId){
-                            taskItem.recipients = new List<ActivityTimelineModel.RecordReference>();
-                            taskItem.recipients.add(new ActivityTimelineModel.RecordReference(taskObj.WhoId, taskObj.Who.Name));
-                        }
-                    }
-
-                    //Related To
-                    if(String.isNotEmpty(taskObj.WhatId)){
-                        //Dont add the current record in related to
-                        if(taskObj.WhatId != recordId){
-                        	taskItem.relatedTo = new ActivityTimelineModel.RecordReference(taskObj.WhatId, taskObj.What.Name);
-                        }
-                    }
-
-                    taskItem.isComplete = mapTaskStatus.get(taskObj.Status).IsClosed;
-                    taskItem.isOverdue = taskObj.ActivityDate < Date.today() && !taskItem.isComplete;
-                    taskItem.isRecurring = taskObj.IsRecurrence;
-                    taskItem.isPriority = mapTaskPriority.get(taskObj.Priority).IsHighPriority;
-
-                    returnList.add(taskItem);
-                }
+        Set<Id> nonEmailMessageTaskSet=new Set<Id>();
+        for(Task taskObj: taskList) {
+            if(taskObj.TaskSubtype == 'Email'){
+                //Collect tasks for handling email messages separately
+                mapEmailTasks.put(taskObj.Id, taskObj);
             }
+        }
+
+        if(taskList.size() > 0) {
 
             //Process Email Tasks
             if(mapEmailTasks.size() > 0) {
@@ -167,10 +143,10 @@ public class ActivityTimelineController {
                                                        		(SELECT Id, RelationType, RelationId, Relation.Name, RelationAddress
                                                             	FROM EmailMessageRelations)
                                                        	FROM EmailMessage
-                                                       	WHERE ActivityId IN: mapEmailTasks.keySet()];
+                                                       	WHERE ActivityId IN: mapEmailTasks.keySet()  AND IsDeleted = false  ALL ROWS];
                 For(EmailMessage emailMsg : lstEmailMessages){
                     Task taskObj = mapEmailTasks.get(emailMsg.ActivityId);
-
+                    nonEmailMessageTaskSet.add(emailMsg.ActivityId);
                     ActivityTimelineModel emailItem = new ActivityTimelineModel();
                     
                     emailItem.recordId = emailMsg.Id;
@@ -213,6 +189,49 @@ public class ActivityTimelineController {
                     returnList.add(emailItem);
                 }
             }
+
+            for(Task taskObj: taskList) {
+                if(!nonEmailMessageTaskSet.contains(taskObj.Id)){
+                    ActivityTimelineModel taskItem = new ActivityTimelineModel();
+                    
+                    taskItem.recordId = taskObj.Id;
+                    taskItem.sobjectName = String.valueOf(Task.SobjectType);
+                    taskItem.activityTimelineType = taskObj.TaskSubtype;
+                    taskItem.activityDate = taskObj.ActivityDate;
+                    taskItem.subject = taskObj.Subject;
+                    taskItem.detail = taskObj.Description;
+
+                    //Assigned To
+                    taskItem.assignedTo = new ActivityTimelineModel.RecordReference(taskObj.OwnerId, taskObj.Owner.Name);
+
+                    //Recipients
+                    if(String.isNotEmpty(taskObj.WhoId)){
+                        //Dont add the current record in Task Contact
+                        if(taskObj.WhoId != recordId){
+                            taskItem.recipients = new List<ActivityTimelineModel.RecordReference>();
+                            taskItem.recipients.add(new ActivityTimelineModel.RecordReference(taskObj.WhoId, taskObj.Who.Name));
+                        }
+                    }
+
+                    //Related To
+                    if(String.isNotEmpty(taskObj.WhatId)){
+                        //Dont add the current record in related to
+                        if(taskObj.WhatId != recordId){
+                        	taskItem.relatedTo = new ActivityTimelineModel.RecordReference(taskObj.WhatId, taskObj.What.Name);
+                        }
+                    }
+
+                    taskItem.isComplete = mapTaskStatus.get(taskObj.Status).IsClosed;
+                    taskItem.isOverdue = taskObj.ActivityDate < Date.today() && !taskItem.isComplete;
+                    taskItem.isRecurring = taskObj.IsRecurrence;
+                    taskItem.isPriority = mapTaskPriority.get(taskObj.Priority).IsHighPriority;
+
+                    returnList.add(taskItem);
+                }
+                
+            }
+
+            
         }
     }
 
@@ -220,7 +239,8 @@ public class ActivityTimelineController {
         List<Event> eventList = [SELECT Id, ActivityDate, Description, EndDateTime, EventSubtype, IsRecurrence, OwnerId, Owner.Name, 
                                  		StartDateTime, Subject, Type, WhatId, What.Name, WhoId, Who.Name
                                 	FROM Event
-                                	WHERE WhatId IN: whatIdSet OR WhoId IN: whoIdSet OR Id IN: eventIdSet];
+                                	WHERE (WhatId IN: whatIdSet OR WhoId IN: whoIdSet OR Id IN: eventIdSet) AND IsDeleted = false  
+                                    ORDER BY ActivityDate DESC NULLS LAST ALL ROWS];
         
         if(eventList.size() > 0) {
             for(Event eventObj: eventList) {

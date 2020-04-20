@@ -1,6 +1,6 @@
 <design:component>
 	<design:attribute name="includeChildren"
-		label="Include Activities from all Related Objects? (only valid for Accounts)" />
+		label="Include Activities from all Related Objects? (only valid for Accounts and Contacts)" />
 	<design:supportedFormFactors>
 		<design:supportedFormFactor type="Large" />
 		<design:supportedFormFactor type="Small" />
